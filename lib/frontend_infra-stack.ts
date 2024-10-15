@@ -20,6 +20,9 @@ export class FrontendInfraStack extends cdk.Stack {
       accessControl: BucketAccessControl.PRIVATE,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true, // Only for dev/test environments
+      websiteIndexDocument: "index.html",
+      websiteErrorDocument: "index.html",
     });
 
     const originAccessIdentity = new OriginAccessIdentity(
@@ -44,12 +47,6 @@ export class FrontendInfraStack extends cdk.Stack {
       errorResponses: [
         {
           httpStatus: 403, // Handle 403 Forbidden by returning index.html
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-          ttl: cdk.Duration.seconds(0),
-        },
-        {
-          httpStatus: 404, // Handle 404 Not Found by returning index.html
           responseHttpStatus: 200,
           responsePagePath: "/index.html",
           ttl: cdk.Duration.seconds(0),
