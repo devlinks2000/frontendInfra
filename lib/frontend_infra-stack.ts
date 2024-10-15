@@ -1,51 +1,75 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
-import * as s3 from "aws-cdk-lib/aws-s3";
-import * as iam from "aws-cdk-lib/aws-iam";
-import * as cloudfront from "aws-cdk-lib/aws-cloudfront"; // Import CloudFront module
-import * as origins from "aws-cdk-lib/aws-cloudfront-origins"; // Import CloudFront origins module
 import * as acm from "aws-cdk-lib/aws-certificatemanager"; // Import ACM module
 import * as route53 from "aws-cdk-lib/aws-route53"; // Import Route 53 module
 import * as route53targets from "aws-cdk-lib/aws-route53-targets"; // Import Route 53 targets module
+import { Bucket, BucketAccessControl } from "aws-cdk-lib/aws-s3";
+import { Distribution, OriginAccessIdentity } from "aws-cdk-lib/aws-cloudfront";
+import { S3Origin } from "aws-cdk-lib/aws-cloudfront-origins";
 
 interface FrontendInfraStackProps extends cdk.StackProps {
-  websiteBucket: s3.Bucket;
-  originAccessIdentity: cloudfront.OriginAccessIdentity;
+  domain: string;
 }
 
 export class FrontendInfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: FrontendInfraStackProps) {
     super(scope, id, props);
 
+    const bucket = new Bucket(this, "Bucket", {
+      bucketName: props.domain,
+      accessControl: BucketAccessControl.PRIVATE,
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    const originAccessIdentity = new OriginAccessIdentity(
+      this,
+      "OriginAccessIdentity"
+    );
+
+    bucket.grantRead(originAccessIdentity);
+
     const myCertificate = new acm.Certificate(this, "MyCertificate", {
-      domainName: "davidarevalo.xyz",
+      domainName: props.domain,
       validation: acm.CertificateValidation.fromDns(), // Use DNS validation
     });
 
-    const distribution = new cloudfront.Distribution(
-      this,
-      "WebsiteDistribution",
-      {
-        defaultBehavior: {
-          origin: new origins.S3Origin(props.websiteBucket, {
-            originAccessIdentity: props.originAccessIdentity, // Set the OAI
-          }),
+    const cf = new Distribution(this, "Distribution", {
+      defaultRootObject: "index.html",
+      defaultBehavior: {
+        origin: new S3Origin(bucket, { originAccessIdentity }),
+        viewerProtocolPolicy:
+          cdk.aws_cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS, // Ensure HTTPS is used
+      },
+      errorResponses: [
+        {
+          httpStatus: 403, // Handle 403 Forbidden by returning index.html
+          responseHttpStatus: 200,
+          responsePagePath: "/index.html",
+          ttl: cdk.Duration.seconds(0),
         },
-        domainNames: ["davidarevalo.xyz"],
-        certificate: myCertificate,
-      }
-    );
+        {
+          httpStatus: 404, // Handle 404 Not Found by returning index.html
+          responseHttpStatus: 200,
+          responsePagePath: "/index.html",
+          ttl: cdk.Duration.seconds(0),
+        },
+      ],
+      certificate: myCertificate,
+      domainNames: [props.domain],
+    });
 
     const hostedZone = route53.HostedZone.fromLookup(this, "MyHostedZone", {
-      domainName: "davidarevalo.xyz",
+      domainName: props.domain,
     });
 
     new route53.ARecord(this, "AliasRecord", {
       zone: hostedZone,
-      recordName: "www.davidarevalo.xyz",
+      recordName: props.domain,
       target: route53.RecordTarget.fromAlias(
-        new route53targets.CloudFrontTarget(distribution)
+        new route53targets.CloudFrontTarget(cf)
       ),
+      ttl: cdk.Duration.minutes(1),
     });
   }
 }
