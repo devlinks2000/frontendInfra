@@ -68,5 +68,14 @@ export class FrontendInfraStack extends cdk.Stack {
       ),
       ttl: cdk.Duration.minutes(1),
     });
+
+    new route53.ARecord(this, "AliasWWWRecord", {
+      zone: hostedZone,
+      recordName: `www.${props.domain}`,
+      target: route53.RecordTarget.fromAlias(
+        new route53targets.CloudFrontTarget(cf)
+      ),
+      ttl: cdk.Duration.minutes(1),
+    });
   }
 }
