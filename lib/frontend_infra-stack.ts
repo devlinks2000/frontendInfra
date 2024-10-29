@@ -6,17 +6,19 @@ import * as route53targets from "aws-cdk-lib/aws-route53-targets"; // Import Rou
 import { Bucket, BucketAccessControl } from "aws-cdk-lib/aws-s3";
 import { Distribution, OriginAccessIdentity } from "aws-cdk-lib/aws-cloudfront";
 import { S3Origin } from "aws-cdk-lib/aws-cloudfront-origins";
-
-interface FrontendInfraStackProps extends cdk.StackProps {
-  domain: string;
-}
+import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
+import * as codepipelineActions from 'aws-cdk-lib/aws-codepipeline-actions';
+import * as codebuild from "aws-cdk-lib/aws-codebuild";
+import { envs } from "../common/config";
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 
 export class FrontendInfraStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: FrontendInfraStackProps) {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     const bucket = new Bucket(this, "Bucket", {
-      bucketName: props.domain,
+      bucketName: envs.awsDomainName,
       accessControl: BucketAccessControl.PRIVATE,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -33,7 +35,7 @@ export class FrontendInfraStack extends cdk.Stack {
     bucket.grantRead(originAccessIdentity);
 
     const myCertificate = new acm.Certificate(this, "MyCertificate", {
-      domainName: props.domain,
+      domainName: envs.awsDomainName,
       validation: acm.CertificateValidation.fromDns(), // Use DNS validation
     });
 
@@ -53,16 +55,16 @@ export class FrontendInfraStack extends cdk.Stack {
         },
       ],
       certificate: myCertificate,
-      domainNames: [props.domain],
+      domainNames: [envs.awsDomainName],
     });
 
     const hostedZone = route53.HostedZone.fromLookup(this, "MyHostedZone", {
-      domainName: props.domain,
+      domainName: envs.awsDomainName,
     });
 
     new route53.ARecord(this, "AliasRecord", {
       zone: hostedZone,
-      recordName: props.domain,
+      recordName: envs.awsDomainName,
       target: route53.RecordTarget.fromAlias(
         new route53targets.CloudFrontTarget(cf)
       ),
@@ -71,11 +73,95 @@ export class FrontendInfraStack extends cdk.Stack {
 
     new route53.ARecord(this, "AliasWWWRecord", {
       zone: hostedZone,
-      recordName: `www.${props.domain}`,
+      recordName:`www.${envs.awsDomainName}`,
       target: route53.RecordTarget.fromAlias(
         new route53targets.CloudFrontTarget(cf)
       ),
       ttl: cdk.Duration.minutes(1),
     });
+
+    const pipeline = new codepipeline.Pipeline(this, 'FrontendPipeline', {
+      pipelineName: `${envs.awsDomainName}-pipeline`,
+      crossAccountKeys: false,
+    });
+
+    const sourceOutput = new codepipeline.Artifact("SourceArtifact");
+    const buildOutput = new codepipeline.Artifact("BuildArtifact");
+
+    pipeline.addStage({
+      stageName: 'Source',
+      actions: [
+        new codepipelineActions.CodeStarConnectionsSourceAction({
+          actionName: 'GitHub_Source',
+          owner: envs.githubRepositoryOwnerName,      
+          repo: envs.githubRepositoryName,
+          branch: envs.githubRepositoryBranchName,
+          connectionArn: envs.githubConnectionArn,
+          output: sourceOutput,
+          triggerOnPush: true,
+          codeBuildCloneOutput: true,
+          variablesNamespace: 'SourceVariables',
+        }),
+      ],
+    });
+
+    const buildProject = new codebuild.PipelineProject(this, "BuildProject", {
+      environment: {
+         buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
+         computeType: codebuild.ComputeType.SMALL,
+  
+      },
+      buildSpec: codebuild.BuildSpec.fromObject({
+         version: "0.2",
+         phases: {
+            install: {
+               commands: ["npm install"]
+            },
+            build: {
+               commands: ["npm run build"]
+            }
+         },
+         artifacts: {
+            "base-directory": "dist",
+            files: ["**/*"]
+         }
+      })
+   });
+   
+    pipeline.addStage({
+      stageName: "Build",
+      actions: [
+        new codepipelineActions.CodeBuildAction({
+          actionName: "Build",
+          project: buildProject,
+          input: sourceOutput,
+          outputs: [buildOutput],
+        }),
+      ],
+    });
+
+    const snsTopic = new sns.Topic(this, 'ApprovalTopic', {
+      displayName: 'Approval Notifications',
+    });
+
+    snsTopic.addSubscription(new snsSubscriptions.EmailSubscription(envs.approveDeployEmail));
+
+    pipeline.addStage({
+      stageName: "Deploy",
+      actions: [
+        new codepipelineActions.S3DeployAction({
+          actionName: "S3Deploy",
+          bucket: bucket,
+          input: buildOutput,
+        }),
+        new codepipelineActions.ManualApprovalAction({
+          actionName: "ApproveDeploy",
+          notificationTopic: snsTopic,
+          additionalInformation: "Approve the deployment to proceed.",
+        }),
+      ],
+    });
+
+
   }
 }
